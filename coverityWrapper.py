@@ -3,6 +3,7 @@ import logging
 import json
 import re
 import subprocess
+import os
 from colorama import init
 from colorama import Fore, Back, Style
 
@@ -18,15 +19,16 @@ class FastDesktopWrapper:
         self.buildFile = None
         self.generateConfig = False
         self.configFile = None
+        self.compilerConfigCommand = ''
         self.idir = "idir"
         self.suppresions = {}
         self.outputFile = None
-        self.disableQuality = False
-        self.fileFilter = None
+        self.enableQuality = True
+        self.fileIncludeFilter = None
+        self.fileExcludeFilter = None
         self.limitResults = 1000
         self.skipAnalysis = False
         self.skipBuild = False
-        self.useJson = None
         self.outputType = "pretty"
         self.checkerFilter = None
         self.extendedOutput = True
@@ -36,11 +38,19 @@ class FastDesktopWrapper:
         self.issueCount = 0
         self.summary = False
         self.suggestAnnotations = False
+        self.breakBuild = False
+        self.breakBuildCriteria = []
+        self.breakOnlySecurity = False
+        self.breakBuildLimit = 0
+        self.ignoreBuildFailure = False
+        self.exportHtml = False
         try:
-            opts, args = getopt.getopt(sys.argv[1:], 'd:c:l:i:q',
-                                       ['dir=', "configFile=", "useJson=" , "disableQuality", "limitResults=", "includeFiles=",
-                                        "skipAnalysis", "skipBuild", "summary", "checker=", "context=", "output=",
-                                        "outputFile=", "generatePragma", "suggestAnnotations"])
+            opts, args = getopt.getopt(sys.argv[1:], 'd:c:l:i:x:q',
+                                       ['dir=', "configFile=", "compilerConfig=", "enableQuality", "limitResults=",
+                                        "includeFiles=", "excludeFiles=", "skipAnalysis", "skipBuild", "summary",
+                                        "checker=", "context=", "output=", "outputFile=", "generatePragma",
+                                        "suggestAnnotations", "breakBuild", "breakBuildCriteria=", "breakOnlySecurity",
+                                        "breakBuildLimit=", "ignoreBuildFailure", "exportHtml"])
         except getopt.GetoptError:
             self.usage()
             sys.exit(2)
@@ -53,14 +63,18 @@ class FastDesktopWrapper:
                 self.idir = arg
             elif opt in ('-c', '--configFile'):
                 self.configFile = arg
+            elif opt in ('--compilerConfig'):
+                self.compilerConfigCommand = arg
             elif opt in ('-q', '--quiet'):
                 logging.disable(logging.DEBUG)
-            elif opt in ('--disableQuality'):
-                self.disableQuality = True
+            elif opt in ('--enableQuality'):
+                self.enableQuality = True
             elif opt in ('--l', '--limitResults'):
                 self.limitResults = arg
             elif opt in ('-i', '--includeFiles'):
-                self.fileFilter = arg
+                self.fileIncludeFilter = arg
+            elif opt in ('-x', '--excludeFiles'):
+                self.fileExcludeFilter = arg
             elif opt in ('--skipAnalysis'):
                 self.skipAnalysis = True
             elif opt in ('--skipBuild'):
@@ -69,10 +83,6 @@ class FastDesktopWrapper:
                 self.summary = True
             elif opt in ('--checker'):
                 self.checkerFilter = arg
-            elif opt in ('--useJson'):
-                self.useJson = arg
-                self.skipBuild=True
-                self.skipAnalysis=True
             elif opt in ('--context'):
                 self.context = int(arg)
             elif opt in ('--generatePragma'):
@@ -88,11 +98,20 @@ class FastDesktopWrapper:
                     logging.disable(logging.DEBUG)
             elif opt in ('--outputFile'):
                 self.outputFile = arg
+            elif opt in ('--breakBuild'):
+                self.breakBuild = True
+            elif opt in ('--breakBuildCriteria'):
+                self.breakBuildCriteria = [x.strip() for x in arg.split(',')]
+            elif opt in ('--breakOnlySecurity'):
+                self.breakOnlySecurity = True
+            elif opt in ('--breakBuildLimit'):
+                self.breakBuildLimit = int(arg)
+            elif opt in ('--ignoreBuildFailure'):
+                self.ignoreBuildFailure = True
+            elif opt in ('--exportHtml'):
+                self.exportHtml = True
 
         self.fileArgs = args
-
-
-
 
     def usage(self):
 
@@ -106,9 +125,11 @@ where:
 <options>: 
 --dir <dir>              : (Optional) Specify the intermediate directory used to store the Coverity information in
 --config|-c <file>       : (Optional) Specify the Coding standard config file to use for analysis
+--compilerConfig         : (Optional) comma separated String List : specify the compilerConfig commands, each config command separated by a comma
 --quiet|-q               : (Optional) Disable output of standard out for the build and analyse step, set automatically when using emacs output
---includeFiles|-i <file> : (Optional) Filter results on filename regex
---disableQuality         : (Optional) disable quality checkers
+--includeFiles|-i <file> : (Optional) Filter results on filename regex - files will be included
+--excludeFile|-x <file>  : (Optional) Filter results on filename regex - files will be excluded
+--enableQuality          : (Optional) Enable quality checkers
 --skipBuild              : (Optional) Skip the build phase
 --skipAnalysis           : (Optional) Skip the analysis phase (also skips the build phase)
 --summary                : (Optional) Presents single line of information per defect instead of code detail
@@ -117,12 +138,34 @@ where:
 --generatePragmas        : (Optional) (Experimental) Generates a file (stored next to the source file) containing the pragma required to suppress  issues
 --output <output type>   : (Optional) Choose from emacs, pretty, json and html. 
 --outputFile <file|dir>  : (Optional) Specify the output file or dir for json and html mode respectively. Defaults to "pretty"
+--ignoreBuildFailure     : (Optional) Specify the flag to ignore build failure.
+--breakBuild             : (Optional) Specify the flag to enable break the build feature
+--breakBuildCriteria     : (Optional) Comma Separate String, Default Value is empty. Use Comma Separated strings to specify the impact of defects, to break the build. Possible values are: Low, Medium and High.
+--breakOnlySecurity      : (Optional) Specify the flag to break only for security issues
+--breakBuildLimit        : (Optional) Int - Default Value is: 0, set this value if you want to break the build on a certain amount of defects
+--exportHtml             : (Optional) Specify the flag to also generate an html report
 """
         print(help)
+
+    def doCompilerConfig(self):
+        for configCommand in self.compilerConfigCommand.split(','):
+            command = ["cov-configure", "--config", "config/cfg.xml"]
+            for parameter in configCommand.split(' '):
+                command.append(parameter)
+            try:
+                process = subprocess.Popen(command, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+                for line in iter(process.stdout.readline, b''):
+                    logging.debug(line.decode(sys.stdout.encoding).rstrip())
+
+            except subprocess.CalledProcessError as e:
+                logging.debug("Non zero exit :" + str(e.output) + " " + str(e.returncode))
 
     def doBuild(self):
         # Call cov build
         command = ["cov-build", "--dir", self.idir]
+        if self.compilerConfigCommand:
+            command.append("--config")
+            command.append("config/cfg.xml")
         if self.configFile:
             command.append("--emit-complementary-info")
         command.extend(self.fileArgs)
@@ -132,8 +175,13 @@ where:
             for line in iter(process.stdout.readline, b''):
                 logging.debug(line.decode(sys.stdout.encoding).rstrip())
 
+            process.communicate()[0]
+            print('exit code is: {}'.format(process.returncode))
+            return process.returncode
+
         except subprocess.CalledProcessError as e:
             logging.debug("Non zero exit :" + str(e.output) + " " + str(e.returncode))
+            return e.returncode
 
     def loadSuppressions(self):
         logging.debug("Loading suppressions")
@@ -159,10 +207,11 @@ where:
 
     def doAnalyze(self):
 
-        command = ["cov-analyze", "--enable-constraint-fpp", "--dir", self.idir]
+        command = ["cov-analyze", "-all", "--enable-constraint-fpp", "--aggressiveness-level", "high", "--dir",
+                   self.idir]
         if self.configFile:
             command.extend(["--coding-standard-config", self.configFile])
-        if self.disableQuality:
+        if not self.enableQuality:
             command.append("--disable-default")
         try:
             process = subprocess.Popen(command, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
@@ -176,23 +225,24 @@ where:
 
         self.loadSuppressions()
         command = ["cov-format-errors", "--dir", self.idir]
-        if self.fileFilter:
-            command.extend(["--include-files", self.fileFilter])
+        if self.fileIncludeFilter:
+            command.extend(["--include-files", self.fileIncludeFilter])
+
+        if self.fileExcludeFilter:
+            command.extend(["--exclude-files", self.fileExcludeFilter])
 
         if self.outputType == "pretty" or self.outputType == "json":
-            if self.useJson:
-                self.processJson(self.useJson)
-            else:
-                if not self.outputFile:
-                    self.outputFile = "results.json"
-                # Call cov-format-errors
-                command.extend(["--json-output-v7", self.outputFile])
-                try:
-                    result = subprocess.check_output(command, stderr=subprocess.STDOUT)
-                except subprocess.CalledProcessError as e:
-                    logging.debug("Non zero exit :" + str(e.output) + " " + str(e.returncode))
+            if not self.outputFile:
+                self.outputFile = "results.json"
+            # Call cov-format-errors
+            command.extend(["--json-output-v7", self.outputFile])
+            try:
+                result = subprocess.check_output(command, stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError as e:
+                logging.debug("Non zero exit :" + str(e.output) + " " + str(e.returncode))
 
-                self.processJson(self.outputFile)
+            if self.outputType == "pretty" or self.generatePragma:
+                self.processJson()
 
         elif self.outputType == "html":
             if not self.outputFile:
@@ -219,21 +269,18 @@ where:
 
         return 1
 
-    def processJson(self,filename):
+    def processJson(self):
 
-        with open(filename, encoding='utf-8') as file:
+        with open(self.outputFile, encoding='utf-8') as file:
             self.jsonData = json.load(file)
 
         pragmaCache = {}
 
-        issueKey='issues'
-        if 'issueInfo' in self.jsonData:
-            issueKey='issueInfo'
         self.failed = False
         # Iterate through errors
         self.issueCount = 0
-        totalIssues = len(self.jsonData[issueKey])
-        for issue in self.jsonData[issueKey]:
+        totalIssues = len(self.jsonData['issues'])
+        for issue in self.jsonData['issues']:
             if issue['mergeKey'] in self.suppresions:
                 logging.debug("Skipping issue {}: Suppressed by {} Comment:{}".format(issue['mergeKey'],
                                                                                       self.suppresions[
@@ -247,7 +294,6 @@ where:
                 matched = pattern.search(issue['checkerName'])
                 if not matched:
                     continue
-
             fileName = issue['mainEventFilePathname']
             lineNumber = issue['mainEventLineNumber']
             #   print("File:"+issue['strippedMainEventFilePathname'])
@@ -406,15 +452,94 @@ where:
                     for line in postPrint:
                         print(line)
 
-    def run(self):
+    def doBreakBuild(self):
+        with open('results.json', 'r') as f:
+            results = json.load(f)
 
+        violationCounts = 0
+        # iterate over the issues
+        for issue in results['issues']:
+            if not issue:
+                continue
+
+            checkerProperties = issue['checkerProperties']
+            if not checkerProperties:
+                continue
+
+            issueKinds = checkerProperties['issueKinds']
+            impact = checkerProperties['impact']
+
+            # check if the issue kinds has SECURITY, otherwise skip it
+            if self.breakOnlySecurity:
+                if not 'SECURITY' in issueKinds:
+                    continue
+
+            if not self.breakBuildCriteria:
+                violationCounts += 1
+                continue  # no criteria was set, increment and move on to the next
+
+            else:
+                if impact in self.breakBuildCriteria:
+                    violationCounts += 1
+                    continue
+
+        # finish iteration
+
+        if violationCounts >= self.breakBuildLimit:
+            print('The break the build limit is set at {}'.format(self.breakBuildLimit))
+            print('{} issues were found that violated the build criteria. Breaking Pipeline!'.format(
+                str(violationCounts)))
+            return 3  # return error code 3
+        else:
+            return 0
+
+        return 0
+
+    def removePreviousResultsFile(self):
+        if os.path.isfile('results.json'):
+            os.remove('results.json')
+
+    def doExportHtml(self):
+        self.loadSuppressions()
+        command = ["cov-format-errors", "--dir", self.idir, "--html-output", "results-html"]
+        if self.fileIncludeFilter:
+            command.extend(["--include-files", self.fileIncludeFilter])
+
+        if self.fileExcludeFilter:
+            command.extend(["--exclude-files", self.fileExcludeFilter])
+
+        print("Generating html format (this may take a while!)")
+        try:
+            result = subprocess.check_output(command, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            logging.debug("Non zero exit :" + str(e.output) + " " + str(e.returncode))
+
+    def run(self):
+        if self.compilerConfigCommand and not self.skipAnalysis and not self.skipBuild:
+            self.doCompilerConfig()
         if not self.skipAnalysis and not self.skipBuild:
-            self.doBuild()
+            self.removePreviousResultsFile()
+            buildCode = self.doBuild()
+            if not self.ignoreBuildFailure and buildCode != 0:
+                print('build was not successful, exiting!')
+                return buildCode
+
         if not self.skipAnalysis:
             self.doAnalyze()
-        return self.doFormatErrors();
+
+        if self.exportHtml:
+            self.doExportHtml()
+
+        if self.breakBuild:
+            self.doFormatErrors()
+            return self.doBreakBuild()
+        else:
+            return self.doFormatErrors()
+
+        return 0
 
 
 if __name__ == "__main__":
     wrapper = FastDesktopWrapper(sys.argv[1:])
     sys.exit(wrapper.run())
+
